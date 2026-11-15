@@ -1,6 +1,7 @@
 // Native.cs - Win32, WASAPI (Core Audio) and Media Foundation interop.
 // Written in C# 5 so it compiles with the csc.exe that ships with Windows (.NET Framework 4.x).
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 
 namespace MiniRecorder
@@ -57,7 +58,7 @@ namespace MiniRecorder
     [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     internal interface IMMDeviceEnumerator
     {
-        void EnumAudioEndpoints(EDataFlow dataFlow, int stateMask, out IntPtr devices);
+        void EnumAudioEndpoints(EDataFlow dataFlow, int stateMask, out IMMDeviceCollection devices);
         void GetDefaultAudioEndpoint(EDataFlow dataFlow, ERole role, out IMMDevice device);
         void GetDevice([MarshalAs(UnmanagedType.LPWStr)] string id, out IMMDevice device);
         void RegisterEndpointNotificationCallback(IntPtr client);
@@ -71,6 +72,19 @@ namespace MiniRecorder
         void OpenPropertyStore(int stgmAccess, out IPropertyStore properties);
         void GetId([MarshalAs(UnmanagedType.LPWStr)] out string id);
         void GetState(out int state);
+    }
+
+    [ComImport, Guid("0BD7A1BE-7A1A-44DB-8397-CC5392387B5E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IMMDeviceCollection
+    {
+        void GetCount(out int count);
+        void Item(int index, out IMMDevice device);
+    }
+
+    [ComImport, Guid("1BE09788-6894-4089-8586-9A2A6C265AC5"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IMMEndpoint
+    {
+        void GetDataFlow(out EDataFlow dataFlow);
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -145,16 +159,36 @@ namespace MiniRecorder
         [DllImport("ole32.dll")]
         public static extern int PropVariantClear(ref PropVariant pvar);
 
+        public const int DEVICE_STATE_ACTIVE = 0x1;
+
         /// <summary>Friendly name of the default playback device, e.g. "Speakers (Realtek Audio)".</summary>
         public static string GetDefaultOutputName()
         {
             IMMDeviceEnumerator en = null;
             IMMDevice dev = null;
-            IPropertyStore store = null;
             try
             {
                 en = (IMMDeviceEnumerator)new MMDeviceEnumeratorCom();
                 en.GetDefaultAudioEndpoint(EDataFlow.Render, ERole.Console, out dev);
+                return GetFriendlyName(dev);
+            }
+            catch
+            {
+                return null;
+            }
+            finally
+            {
+                if (dev != null) Marshal.ReleaseComObject(dev);
+                if (en != null) Marshal.ReleaseComObject(en);
+            }
+        }
+
+        /// <summary>Friendly name of a device, or null if it can't be read.</summary>
+        public static string GetFriendlyName(IMMDevice dev)
+        {
+            IPropertyStore store = null;
+            try
+            {
                 dev.OpenPropertyStore(0 /* STGM_READ */, out store);
                 PropertyKey key = PKEY_Device_FriendlyName;
                 PropVariant pv;
@@ -172,9 +206,107 @@ namespace MiniRecorder
             finally
             {
                 if (store != null) Marshal.ReleaseComObject(store);
+            }
+        }
+
+        /// <summary>All active playback (loopback) and recording (microphone/line-in) devices.</summary>
+        public static List<AudioDeviceInfo> ListDevices()
+        {
+            List<AudioDeviceInfo> list = new List<AudioDeviceInfo>();
+            IMMDeviceEnumerator en = null;
+            try
+            {
+                en = (IMMDeviceEnumerator)new MMDeviceEnumeratorCom();
+                AddDevices(en, EDataFlow.Render, list);
+                AddDevices(en, EDataFlow.Capture, list);
+            }
+            catch { }
+            finally
+            {
+                if (en != null) Marshal.ReleaseComObject(en);
+            }
+            return list;
+        }
+
+        private static void AddDevices(IMMDeviceEnumerator en, EDataFlow flow, List<AudioDeviceInfo> list)
+        {
+            IMMDeviceCollection col = null;
+            try
+            {
+                en.EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE, out col);
+                int count;
+                col.GetCount(out count);
+                for (int i = 0; i < count; i++)
+                {
+                    IMMDevice dev = null;
+                    try
+                    {
+                        col.Item(i, out dev);
+                        string id;
+                        dev.GetId(out id);
+                        string name = GetFriendlyName(dev);
+                        list.Add(new AudioDeviceInfo(id, string.IsNullOrEmpty(name) ? "Unknown device" : name, flow == EDataFlow.Capture));
+                    }
+                    catch { }
+                    finally
+                    {
+                        if (dev != null) Marshal.ReleaseComObject(dev);
+                    }
+                }
+            }
+            catch { }
+            finally
+            {
+                if (col != null) Marshal.ReleaseComObject(col);
+            }
+        }
+
+        /// <summary>
+        /// Looks up a device by id. Returns null if it no longer exists or isn't active
+        /// (unplugged or disabled).
+        /// </summary>
+        public static AudioDeviceInfo FindDevice(string id)
+        {
+            if (string.IsNullOrEmpty(id)) return null;
+            IMMDeviceEnumerator en = null;
+            IMMDevice dev = null;
+            try
+            {
+                en = (IMMDeviceEnumerator)new MMDeviceEnumeratorCom();
+                en.GetDevice(id, out dev);
+                int state;
+                dev.GetState(out state);
+                if (state != DEVICE_STATE_ACTIVE) return null;
+                EDataFlow flow;
+                ((IMMEndpoint)dev).GetDataFlow(out flow);
+                string name = GetFriendlyName(dev);
+                return new AudioDeviceInfo(id, string.IsNullOrEmpty(name) ? "Unknown device" : name, flow == EDataFlow.Capture);
+            }
+            catch
+            {
+                return null;
+            }
+            finally
+            {
                 if (dev != null) Marshal.ReleaseComObject(dev);
                 if (en != null) Marshal.ReleaseComObject(en);
             }
+        }
+    }
+
+    /// <summary>An audio endpoint the user can record from.</summary>
+    internal sealed class AudioDeviceInfo
+    {
+        public readonly string Id;
+        public readonly string Name;
+        /// <summary>True for microphones / line-in; false for playback devices (recorded via loopback).</summary>
+        public readonly bool IsInput;
+
+        public AudioDeviceInfo(string id, string name, bool isInput)
+        {
+            Id = id;
+            Name = name;
+            IsInput = isInput;
         }
     }
 

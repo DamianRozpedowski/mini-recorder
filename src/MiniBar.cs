@@ -51,7 +51,7 @@ namespace MiniRecorder
         private DateTime _statusUntil;
         private string _currentWav;
         private string _lastFile;
-        private bool _stopping, _exiting;
+        private bool _stopping, _exiting, _settingsOpen;
         private int _converting;
         private string _hover, _pressed, _tipShown;
 
@@ -107,8 +107,7 @@ namespace MiniRecorder
 
             if (_demo == null)
             {
-                string name = CoreAudio.GetDefaultOutputName();
-                if (!string.IsNullOrEmpty(name)) _deviceName = name;
+                RefreshDeviceName();
             }
             else
             {
@@ -260,15 +259,18 @@ namespace MiniRecorder
                 ShowStatus("Can't use save folder: " + ex.Message, RecText, 8);
                 return;
             }
+            if (!RefreshDeviceName())
+            {
+                ShowStatus("Recording device not connected · pick one in Settings", RecText, 8);
+                return;
+            }
             string name = "Recording " + DateTime.Now.ToString("yyyy-MM-dd HH-mm-ss");
             _currentWav = Path.Combine(_s.SaveFolder, name + ".wav");
             Array.Clear(_bars, 0, _bars.Length);
             _status = null;
-            string dev = CoreAudio.GetDefaultOutputName();
-            if (!string.IsNullOrEmpty(dev)) _deviceName = dev;
             try
             {
-                _engine.Start(_currentWav);
+                _engine.Start(_currentWav, _s.RecordDevice);
             }
             catch (Exception ex)
             {
@@ -278,6 +280,28 @@ namespace MiniRecorder
             _tray.Icon = _iconRec;
             if (!Visible) _tray.ShowBalloonTip(1500, "Recording started", "Ctrl+Alt+R to stop.", ToolTipIcon.None);
             Invalidate();
+        }
+
+        /// <summary>
+        /// Updates the device name shown under the timer from the chosen recording device.
+        /// Returns false if a specific device is chosen but isn't connected.
+        /// </summary>
+        private bool RefreshDeviceName()
+        {
+            if (string.IsNullOrEmpty(_s.RecordDevice))
+            {
+                string def = CoreAudio.GetDefaultOutputName();
+                _deviceName = string.IsNullOrEmpty(def) ? "System audio" : def;
+                return true;
+            }
+            AudioDeviceInfo d = CoreAudio.FindDevice(_s.RecordDevice);
+            if (d == null)
+            {
+                _deviceName = "Recording device not connected";
+                return false;
+            }
+            _deviceName = d.IsInput ? "Mic · " + d.Name : d.Name;
+            return true;
         }
 
         private void StopRecording()
@@ -528,8 +552,8 @@ namespace MiniRecorder
                 quality.DropDownItems.Add(qi);
             }
 
-            ToolStripMenuItem folder = new ToolStripMenuItem("Change save folder…");
-            folder.Click += delegate { ChooseFolder(); };
+            ToolStripMenuItem settings = new ToolStripMenuItem("Settings…");
+            settings.Click += delegate { ShowSettings(); };
             ToolStripMenuItem onTop = new ToolStripMenuItem("Always on top");
             onTop.Click += delegate { _s.AlwaysOnTop = !_s.AlwaysOnTop; TopMost = _s.AlwaysOnTop; _s.Save(); };
             ToolStripMenuItem keys = new ToolStripMenuItem("Keyboard shortcuts…");
@@ -537,7 +561,7 @@ namespace MiniRecorder
             ToolStripMenuItem exit = new ToolStripMenuItem("Exit");
             exit.Click += delegate { ExitApp(); };
 
-            _gearMenu.Items.AddRange(new ToolStripItem[] { fmt, quality, folder, onTop, new ToolStripSeparator(), keys, new ToolStripSeparator(), exit });
+            _gearMenu.Items.AddRange(new ToolStripItem[] { settings, new ToolStripSeparator(), fmt, quality, onTop, new ToolStripSeparator(), keys, new ToolStripSeparator(), exit });
             _gearMenu.Opening += delegate
             {
                 fmtMp3.Checked = _s.Format == "mp3";
@@ -545,7 +569,6 @@ namespace MiniRecorder
                 quality.Enabled = _s.Format == "mp3";
                 foreach (ToolStripMenuItem qi in quality.DropDownItems) qi.Checked = (int)qi.Tag == _s.Mp3Kbps;
                 onTop.Checked = _s.AlwaysOnTop;
-                folder.ToolTipText = _s.SaveFolder;
             };
 
             // Tray menu
@@ -561,9 +584,11 @@ namespace MiniRecorder
             ToolStripMenuItem tFolder = new ToolStripMenuItem("Open recordings folder");
             tFolder.ShortcutKeyDisplayString = "Ctrl+Alt+O";
             tFolder.Click += delegate { OpenFolder(); };
+            ToolStripMenuItem tSettings = new ToolStripMenuItem("Settings…");
+            tSettings.Click += delegate { ShowSettings(); };
             ToolStripMenuItem tExit = new ToolStripMenuItem("Exit");
             tExit.Click += delegate { ExitApp(); };
-            _trayMenu.Items.AddRange(new ToolStripItem[] { tShow, tRec, tPause, tFolder, new ToolStripSeparator(), tExit });
+            _trayMenu.Items.AddRange(new ToolStripItem[] { tShow, tRec, tPause, tFolder, tSettings, new ToolStripSeparator(), tExit });
             _trayMenu.Opening += delegate
             {
                 tShow.Text = Visible ? "Hide bar" : "Show bar";
@@ -573,19 +598,30 @@ namespace MiniRecorder
             };
         }
 
-        private void ChooseFolder()
+        private void ShowSettings()
         {
-            using (FolderBrowserDialog d = new FolderBrowserDialog())
+            if (_settingsOpen) return;
+            _settingsOpen = true;
+            try
             {
-                d.Description = "Choose where recordings are saved";
-                d.SelectedPath = _s.SaveFolder;
-                d.ShowNewFolderButton = true;
-                if (d.ShowDialog(this) == DialogResult.OK)
+                string oldFolder = _s.SaveFolder;
+                using (SettingsDialog d = new SettingsDialog(_s, _engine.IsRecording))
                 {
-                    _s.SaveFolder = d.SelectedPath;
-                    _s.Save();
+                    d.TopMost = _s.AlwaysOnTop;
+                    DialogResult r = Visible ? d.ShowDialog(this) : d.ShowDialog();
+                    if (r != DialogResult.OK) return;
+                }
+                if (_demo == null && !_engine.IsRecording) RefreshDeviceName();
+                if (!string.Equals(oldFolder, _s.SaveFolder, StringComparison.OrdinalIgnoreCase))
+                {
+                    _lastFile = null; // "open folder" should go to the new folder
                     ShowStatus("Saving to " + _s.SaveFolder, TextMuted, 5);
                 }
+                Invalidate();
+            }
+            finally
+            {
+                _settingsOpen = false;
             }
         }
 
