@@ -1,5 +1,5 @@
-// AudioEngine.cs - records whatever is playing on the default output device (WASAPI loopback)
-// into a 16-bit stereo WAV file.
+// AudioEngine.cs - records a playback device (WASAPI loopback, i.e. whatever the computer is
+// playing) or a recording device (microphone / line-in) into a 16-bit stereo WAV file.
 using System;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -22,6 +22,7 @@ namespace MiniRecorder
         private float _peak;
         private readonly object _peakLock = new object();
         private string _path;
+        private string _deviceId;
 
         public bool IsRecording { get { return _thread != null; } }
         public bool IsPaused { get { return _paused; } set { _paused = value; } }
@@ -39,10 +40,15 @@ namespace MiniRecorder
             }
         }
 
-        public void Start(string wavPath)
+        /// <summary>
+        /// Starts recording. deviceId is an endpoint id from CoreAudio.ListDevices, or null/empty
+        /// for the default playback device.
+        /// </summary>
+        public void Start(string wavPath, string deviceId)
         {
             if (_thread != null) throw new InvalidOperationException("Already recording.");
             _path = wavPath;
+            _deviceId = deviceId;
             _stopRequested = false;
             _paused = false;
             Interlocked.Exchange(ref _framesWritten, 0);
@@ -83,13 +89,32 @@ namespace MiniRecorder
             try
             {
                 enumerator = (IMMDeviceEnumerator)new MMDeviceEnumeratorCom();
-                try
+                bool isInput = false;
+                if (string.IsNullOrEmpty(_deviceId))
                 {
-                    enumerator.GetDefaultAudioEndpoint(EDataFlow.Render, ERole.Console, out device);
+                    try
+                    {
+                        enumerator.GetDefaultAudioEndpoint(EDataFlow.Render, ERole.Console, out device);
+                    }
+                    catch (COMException)
+                    {
+                        throw new Exception("No playback device was found. Plug in or enable speakers/headphones and try again.");
+                    }
                 }
-                catch (COMException)
+                else
                 {
-                    throw new Exception("No playback device was found. Plug in or enable speakers/headphones and try again.");
+                    int state = 0;
+                    try
+                    {
+                        enumerator.GetDevice(_deviceId, out device);
+                        device.GetState(out state);
+                    }
+                    catch (COMException) { }
+                    if (device == null || state != CoreAudio.DEVICE_STATE_ACTIVE)
+                        throw new Exception("The selected recording device isn't available. Plug it in or pick another one in Settings.");
+                    EDataFlow flow;
+                    ((IMMEndpoint)device).GetDataFlow(out flow);
+                    isInput = flow == EDataFlow.Capture;
                 }
 
                 object o;
@@ -101,8 +126,9 @@ namespace MiniRecorder
                 SampleFormat fmt = SampleFormat.Read(mixFormat);
                 _sampleRate = fmt.SampleRate;
 
-                // 1-second shared-mode loopback buffer, polled every 10 ms.
-                captureClient.Initialize(CoreAudio.AUDCLNT_SHAREMODE_SHARED, CoreAudio.AUDCLNT_STREAMFLAGS_LOOPBACK,
+                // 1-second shared-mode buffer, polled every 10 ms. Playback devices are captured
+                // via loopback; microphones are captured directly.
+                captureClient.Initialize(CoreAudio.AUDCLNT_SHAREMODE_SHARED, isInput ? 0 : CoreAudio.AUDCLNT_STREAMFLAGS_LOOPBACK,
                                          10000000, 0, mixFormat, IntPtr.Zero);
                 Guid capIid = CoreAudio.IID_IAudioCaptureClient;
                 captureClient.GetService(ref capIid, out o);
@@ -110,25 +136,29 @@ namespace MiniRecorder
 
                 // Loopback delivers nothing while the device is silent, which would cut quiet
                 // stretches out of the recording. Playing inaudible silence keeps the clock running.
+                // Microphones deliver audio continuously, so they don't need this.
                 int silenceFrames = 0;
-                try
+                if (!isInput)
                 {
-                    Guid iid2 = CoreAudio.IID_IAudioClient;
-                    device.Activate(ref iid2, CoreAudio.CLSCTX_ALL, IntPtr.Zero, out o);
-                    silenceClient = (IAudioClient)o;
-                    silenceClient.Initialize(CoreAudio.AUDCLNT_SHAREMODE_SHARED, 0, 10000000, 0, mixFormat, IntPtr.Zero);
-                    silenceClient.GetBufferSize(out silenceFrames);
-                    Guid rIid = CoreAudio.IID_IAudioRenderClient;
-                    silenceClient.GetService(ref rIid, out o);
-                    silenceRender = (IAudioRenderClient)o;
-                    IntPtr dummy;
-                    silenceRender.GetBuffer(silenceFrames, out dummy);
-                    silenceRender.ReleaseBuffer(silenceFrames, CoreAudio.AUDCLNT_BUFFERFLAGS_SILENT);
-                    silenceClient.Start();
-                }
-                catch
-                {
-                    silenceRender = null; // not fatal - capture still works, only gaps may be skipped
+                    try
+                    {
+                        Guid iid2 = CoreAudio.IID_IAudioClient;
+                        device.Activate(ref iid2, CoreAudio.CLSCTX_ALL, IntPtr.Zero, out o);
+                        silenceClient = (IAudioClient)o;
+                        silenceClient.Initialize(CoreAudio.AUDCLNT_SHAREMODE_SHARED, 0, 10000000, 0, mixFormat, IntPtr.Zero);
+                        silenceClient.GetBufferSize(out silenceFrames);
+                        Guid rIid = CoreAudio.IID_IAudioRenderClient;
+                        silenceClient.GetService(ref rIid, out o);
+                        silenceRender = (IAudioRenderClient)o;
+                        IntPtr dummy;
+                        silenceRender.GetBuffer(silenceFrames, out dummy);
+                        silenceRender.ReleaseBuffer(silenceFrames, CoreAudio.AUDCLNT_BUFFERFLAGS_SILENT);
+                        silenceClient.Start();
+                    }
+                    catch
+                    {
+                        silenceRender = null; // not fatal - capture still works, only gaps may be skipped
+                    }
                 }
 
                 writer = new WavWriter(_path, fmt.SampleRate, 2, 16);
@@ -220,7 +250,7 @@ namespace MiniRecorder
             if (com != null)
             {
                 uint code = (uint)com.ErrorCode;
-                if (code == 0x88890004) return "The playback device was disconnected or changed. The recording up to that point was saved.";
+                if (code == 0x88890004) return "The recording device was disconnected or changed. The recording up to that point was saved.";
                 if (code == 0x8889000A) return "The audio device is in use by another app in exclusive mode.";
                 return "Audio error 0x" + code.ToString("X8") + ": " + ex.Message;
             }

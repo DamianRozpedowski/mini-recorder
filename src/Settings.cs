@@ -8,6 +8,7 @@ namespace MiniRecorder
     internal sealed class Settings
     {
         public string SaveFolder;
+        public string RecordDevice = "";   // endpoint id; empty = default playback device (system audio)
         public string Format = "mp3";      // "mp3" or "wav"
         public int Mp3Kbps = 192;
         public bool AlwaysOnTop = true;
@@ -39,6 +40,7 @@ namespace MiniRecorder
                 string v;
                 int n;
                 if (d.TryGetValue("SaveFolder", out v) && v.Length > 0) s.SaveFolder = v;
+                if (d.TryGetValue("RecordDevice", out v)) s.RecordDevice = v;
                 if (d.TryGetValue("Format", out v) && (v == "mp3" || v == "wav")) s.Format = v;
                 if (d.TryGetValue("Mp3Kbps", out v) && int.TryParse(v, out n)) s.Mp3Kbps = n;
                 if (d.TryGetValue("AlwaysOnTop", out v)) s.AlwaysOnTop = v != "0";
@@ -58,6 +60,7 @@ namespace MiniRecorder
                 File.WriteAllLines(FilePath, new[]
                 {
                     "SaveFolder=" + SaveFolder,
+                    "RecordDevice=" + (RecordDevice ?? ""),
                     "Format=" + Format,
                     "Mp3Kbps=" + Mp3Kbps,
                     "AlwaysOnTop=" + (AlwaysOnTop ? "1" : "0"),

@@ -6,7 +6,8 @@ A tiny, always-on-top Windows app that records whatever your computer is playing
 
 ## Features
 
-- Records the default playback device (speakers/headphones) using WASAPI loopback. The microphone is not included.
+- Records the default playback device (speakers/headphones) using WASAPI loopback.
+- **Settings** (gear menu or tray menu) lets you pick the recording device, either any playback device (system audio) or a microphone/line-in, and the folder recordings are saved to. Both are remembered between launches.
 - Floating bar you can drag anywhere. It stays on top of other windows and hides to the system tray.
 - Live level meter, pause/resume, and a one-click button to open the recordings folder.
 - Saves to MP3 (128/192/320 kbps) with Windows' built-in encoder, or to lossless WAV.
@@ -38,7 +39,7 @@ Run `build.bat`. It uses the C# compiler that comes with Windows
 
 ## Where things go
 
-- Recordings: `Music\Recordings\Recording YYYY-MM-DD HH-MM-SS.mp3` (changeable in the gear menu)
+- Recordings: `Music\Recordings\Recording YYYY-MM-DD HH-MM-SS.mp3` (changeable in Settings)
 - Settings: `%APPDATA%\MiniRecorder\settings.ini`
 
 ## Notes
@@ -51,8 +52,9 @@ Run `build.bat`. It uses the C# compiler that comes with Windows
 | File | Purpose |
 |---|---|
 | `src/MiniBar.cs` | The floating bar UI, tray icon, menus, global hotkeys |
-| `src/AudioEngine.cs` | WASAPI loopback capture → 16-bit stereo WAV |
+| `src/AudioEngine.cs` | WASAPI capture (loopback or microphone) → 16-bit stereo WAV |
 | `src/Mp3Converter.cs` | WAV → MP3 via Media Foundation |
 | `src/Native.cs` | Win32, Core Audio and Media Foundation interop |
 | `src/Settings.cs` | Settings file |
+| `src/SettingsDialog.cs` | Settings window (recording device, save folder) |
 | `src/Program.cs` | Entry point, single-instance guard |
